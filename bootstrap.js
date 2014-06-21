@@ -1,34 +1,46 @@
 const { classes: Cc, interfaces: Ci, utils: Cu } = Components;
-Cu.import("resource:///modules/CustomizableUI.jsm");
+Cu.import("resource://gre/modules/Services.jsm");
 
 function LOG(msg) {
-  Cc["@mozilla.org/consoleservice;1"].getService(Ci.nsIConsoleService).logStringMessage(msg);
+  Services.console.logStringMessage("reb:" + msg);
 }
 
-let wm = Cc["@mozilla.org/appshell/window-mediator;1"].getService(Ci.nsIWindowMediator);
-let baseSocket = Cc["@mozilla.org/tcp-socket;1"].createInstance(Ci.nsIDOMTCPSocket);
-let currentSock = undefined;
-let videoStream = undefined;
+function isFennec() {
+  return Services.appinfo.ID == "{aa3c5121-dab2-40e2-81ca-7ea25febc110}";
+}
+
+let gBaseSocket = Cc["@mozilla.org/tcp-socket;1"].createInstance(Ci.nsIDOMTCPSocket);
+let gCurrentSock = null;
+let gVideoStream = null;
 
 const kButtonId = "tab-share-ea99e696-aab4-44d6-b69e-2701863d2e1c";
 
 function error(msg) {
-  LOG("ERROR: " + msg);
+  LOG("Error: " + msg);
 }
 
 function createSocket(window, pc, offer) {
-  let socket = baseSocket.open("localhost", 8088, {useSecureTransport: false, binaryType: 'string'});
+  let target = "10.0.1.23";
+//  let target = "localhost";
+//  let target = "10.252.28.237";
+  let socket = gBaseSocket.open(target, 8088, {useSecureTransport: false, binaryType: 'string'});
 
   socket.ondata = function(response) {
     LOG("response->\n" + response.data);
-    pc.setRemoteDescription(new window.mozRTCSessionDescription({"type":"answer", "sdp":response.data}), function() {
-      LOG("Set description");
-    }, error)
+    pc.setRemoteDescription(
+      new window.mozRTCSessionDescription({"type":"answer", "sdp":response.data}),
+      function() {
+        LOG("Set description");
+        if (isFennec()) {
+          window.NativeWindow.menu.update(gMenuItem, { name: "Stop Tab Stream" });
+        }
+      },
+      error);
   };
 
   socket.onerror = function(err) {
     LOG("Failed sending string: " + err);
-    currentSock = undefined;
+    gCurrentSock = null;
   };
 
   socket.onopen = function() {
@@ -40,7 +52,8 @@ function createSocket(window, pc, offer) {
 }
 
 function gum(window, stream) {
-  videoStream = stream;
+LOG("gum");
+  gVideoStream = stream;
 
   let pc = new window.mozRTCPeerConnection;
 
@@ -48,14 +61,50 @@ function gum(window, stream) {
 
   pc.createOffer(function(offer) {
     pc.setLocalDescription(new window.mozRTCSessionDescription(offer), function() {
-      currentSock = createSocket(window, pc, offer);
+LOG("Sending offer");
+      gCurrentSock = createSocket(window, pc, offer);
     }, error);
   }, error);
 }
 
-function startup(aData, aReason) {
-  let wm = Cc["@mozilla.org/appshell/window-mediator;1"].getService(Ci.nsIWindowMediator);
+let gMenuItem = null;
 
+function streamFennecTab (window) {
+  if (gVideoStream) {
+    gVideoStream.stop();
+    gVideoStream = null;
+    gCurrentSock = null;
+    window.NativeWindow.menu.update(gMenuItem, { name: "Start Tab Stream" });
+  }
+  else {
+LOG("streamFennecTab");
+    let tabSource = Cc["@mozilla.org/tab-source-service;1"].createInstance(Ci.nsITabSource);
+    if (Services.androidBridge && Services.androidBridge.getTabStream) {
+LOG("androidBridge.getTabStream");
+      Services.androidBridge.getTabStream(window, tabSource, (stream) => gum(window, stream), error);
+    }
+    else {
+      LOG("Error: androidBridge.getTabStream not defined.");
+    }
+  }
+}
+
+function startupFennec(window) {
+  gMenuItem = window.NativeWindow.menu.add("Start Tab Stream",
+                                           "chrome://tab-share/content/rec18.png",
+                                           () => streamFennecTab(window));
+}
+
+function shutdownFennec(window) {
+
+  if (gMenuItem) {
+    window.NativeWindow.menu.remove(gMenuItem);
+    gMenuItem = null;
+  }
+}
+
+function startupDesktop(window) {
+  Cu.import("resource:///modules/CustomizableUI.jsm");
   let widgetSpec = {
     id: kButtonId,
     type: "button",
@@ -66,21 +115,72 @@ function startup(aData, aReason) {
       aNode.setAttribute("image", "chrome://tab-share/content/rec18.png");
     },
     onCommand: function(aEvent) {
-      LOG("Great success!");
-      if (videoStream) {
-        videoStream.stop();
-        videoStream = undefined;
-        currentSock = undefined;
+      if (gVideoStream) {
+        gVideoStream.stop();
+        gVideoStream = null;
+        gCurrentSock = null;
       }
       else {
-        let window = wm.getMostRecentWindow("navigator:browser");
-        window.navigator.mozGetUserMedia({video:true}, (stream) => gum(window, stream) , error);
+        window.navigator.mozGetUserMedia({video:true}, (stream) => gum(window, stream), error);
       }
     },
   };
 
   CustomizableUI.createWidget(widgetSpec);
   CustomizableUI.addWidgetToArea(kButtonId, "nav-bar");
+}
+
+function loadIntoWindow(window) {
+  if (!window)
+    return;
+
+  if (isFennec()) {
+    startupFennec(window);
+  }
+  else {
+    startupDesktop(window);
+  }
+}
+
+function unloadFromWindow(window) {
+  if (!window)
+    return;
+
+  if (isFennec()) {
+    shutdownFennec(window);
+  }
+  else {
+    CustomizableUI.destroyWidget(kButtonId);
+  }
+}
+
+var windowListener = {
+  onOpenWindow: function(aWindow) {
+    // Wait for the window to finish loading
+    let window = aWindow.QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIDOMWindowInternal || Ci.nsIDOMWindow);
+    window.addEventListener("load", function() {
+      window.removeEventListener("load", arguments.callee, false);
+      loadIntoWindow(window);
+    }, false);
+  },
+
+  onCloseWindow: function(aWindow) {
+  },
+
+  onWindowTitleChange: function(aWindow, aTitle) {
+  }
+};
+
+function startup(aData, aReason) {
+  // Load into any existing windows
+  let list = Services.wm.getEnumerator("navigator:browser");
+  while (list.hasMoreElements()) {
+    let window = list.getNext().QueryInterface(Ci.nsIDOMWindow);
+    loadIntoWindow(window);
+  }
+
+  // Load into any new windows
+  Services.wm.addListener(windowListener);
 }
 
 function shutdown(aData, aReason) {
@@ -90,7 +190,15 @@ function shutdown(aData, aReason) {
     return;
   }
 
-  CustomizableUI.destroyWidget(kButtonId);
+  Services.wm.removeListener(windowListener);
+
+  // Unload from any existing windows
+  let list = Services.wm.getEnumerator("navigator:browser");
+  while (list.hasMoreElements()) {
+    let window = list.getNext().QueryInterface(Ci.nsIDOMWindow);
+    unloadFromWindow(window);
+  }
+
 }
 
 function install(aData, aReason) {}
