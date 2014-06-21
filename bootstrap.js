@@ -39,8 +39,12 @@ function createSocket(window, pc, offer) {
   };
 
   socket.onerror = function(err) {
-    LOG("Failed sending string: " + err);
+    LOG("Failed sending string: " + JSON.stringify(err));
     gCurrentSock = null;
+    if (gVideoStream) {
+      gVideoStream.stop();
+      gVideoStream = null;
+    }
   };
 
   socket.onopen = function() {
@@ -69,7 +73,8 @@ LOG("Sending offer");
 
 let gMenuItem = null;
 
-function streamFennecTab (window) {
+function streamFennecTab () {
+  let window = Services.wm.getMostRecentWindow("navigator:browser");
   if (gVideoStream) {
     gVideoStream.stop();
     gVideoStream = null;
@@ -92,7 +97,7 @@ LOG("androidBridge.getTabStream");
 function startupFennec(window) {
   gMenuItem = window.NativeWindow.menu.add("Start Tab Stream",
                                            "chrome://tab-share/content/rec18.png",
-                                           () => streamFennecTab(window));
+                                           streamFennecTab());
 }
 
 function shutdownFennec(window) {
@@ -103,8 +108,11 @@ function shutdownFennec(window) {
   }
 }
 
-function startupDesktop(window) {
+if (!isFennec()) {
   Cu.import("resource:///modules/CustomizableUI.jsm");
+}
+
+function startupDesktop(window) {
   let widgetSpec = {
     id: kButtonId,
     type: "button",
@@ -121,6 +129,7 @@ function startupDesktop(window) {
         gCurrentSock = null;
       }
       else {
+        let window = Services.wm.getMostRecentWindow("navigator:browser");
         window.navigator.mozGetUserMedia({video:true}, (stream) => gum(window, stream), error);
       }
     },
